@@ -12,7 +12,7 @@
   python3 tool/run.py -s 序列号 suspend 包名 …       挂起广告包（先征得机主同意），记录到 backups/.../suspended.txt
   python3 tool/run.py -s 序列号 unsuspend [包名 …]   解除挂起（不给包名=解除记录里的全部）
   python3 tool/run.py -s 序列号 quickapp          只读：检测快应用组件（装没装、挂没挂、在不在跑、用没用过）
-  python3 tool/run.py -s 序列号 quickapp off      关闭快应用：挂起全部快应用组件（先征得机主同意）
+  python3 tool/run.py -s 序列号 quickapp off      关闭快应用：挂起快应用组件（快递等系统服务依赖的框架自动保留；先征得机主同意）
   python3 tool/run.py -s 序列号 quickapp on       恢复快应用
   python3 tool/run.py -s 序列号 finish             收尾：插电常亮改回备份时的值，提醒关闭开发者模式
   python3 tool/run.py -s 序列号 dev-off --yes      从电脑上关闭开发者模式和 USB 调试（执行后电脑与手机断开）
@@ -43,6 +43,9 @@ AD_PKGS = {
 
 # 快应用组件：免安装的「轻 App」，广告常用 hap:// 链接把人跳进去。
 # (包名, 名称, 品牌, 是否实测过挂起)
+# OPPO 三项在 PMX110 / ColorOS 17 上逐个单独挂起实测（2026-10-30，Issue #335）：
+#   platform 挂起 → 负一屏快递卡片打不开，弹「快应用服务框架目前无法使用。该应用是由Shell所管理。」（必须保留）
+#   local.service / card 单独挂起 → 快递卡片与详情页均正常（可以挂）
 QUICKAPP = [
     ("com.nearme.instant.platform", "快应用平台", "OPPO / 一加 / realme", True),
     ("com.oppo.instant.local.service", "快应用本地服务", "OPPO / 一加 / realme", True),
@@ -58,6 +61,11 @@ QUICKAPP = [
 # 挂了会坏功能的包，不许挂
 NEVER = {"com.heytap.quicksearchbox", "com.coloros.assistantscreen", "com.android.systemui",
          "com.vivo.systemuiplugin", "com.heytap.market", "com.xiaomi.market", "com.hihonor.appmarket"}
+
+# 快应用里挂起会误伤系统功能、quickapp off 必须保留的组件（PMX110 / ColorOS 17 真机逐个挂起实测，Issue #335）
+QUICKAPP_KEEP = {
+    "com.nearme.instant.platform": "快应用平台主框架，负一屏快递助手等系统卡片服务依赖它，挂起会弹「应用无法使用」",
+}
 
 
 def adb_bin():
@@ -461,19 +469,25 @@ def main():
                 print(f"  {q['name']:<10} {q['pkg']:<34} {'已关闭' if q['closed'] else '未关闭'}  "
                       f"{'后台在跑' if q['running'] else '没在跑'}  "
                       f"{'近期打开过 %d 次' % q['used'] if q['used'] else '近期没打开过'}"
-                      f"{'  （系统服务开关）' if q['method'] == 'setting' else ('' if q['tested'] else '  （这个包的挂起效果还没实测）')}")
+                      f"{'  （系统服务开关）' if q['method'] == 'setting' else ('' if q['tested'] else '  （这个包的挂起效果还没实测）')}"
+                      f"{'  （保留：' + QUICKAPP_KEEP[q['pkg']] + '）' if q['pkg'] in QUICKAPP_KEEP else ''}")
             h = sh(s, "pm query-activities --brief -a android.intent.action.VIEW -d hap://app/x")
             who = re.findall(r"^\s*(\S+/\S+)$", h, re.M)
-            if all(q["closed"] for q in qs):
-                print("快应用组件已关闭；系统可能显示「应用无法使用」或「快应用服务已关闭」。恢复：quickapp on")
+            if all(q["closed"] or q["pkg"] in QUICKAPP_KEEP for q in qs):
+                print("可挂起的快应用组件已关闭（保留项除外）；恢复：quickapp on")
             else:
                 if who:
                     print(f"hap:// 链接由 {who[0]} 接管：网页或 App 里的广告可以用这类链接跳进快应用。")
                 print("关闭：python3 tool/run.py -s %s quickapp off（要机主同意，可还原）" % s)
         elif sub == "off":
-            todo = [q["pkg"] for q in qs if not q["closed"] and q["method"] == "suspend"]
+            todo = [q["pkg"] for q in qs if not q["closed"] and q["method"] == "suspend"
+                    and q["pkg"] not in QUICKAPP_KEEP]
             why = {}
             for q in qs:
+                if q["pkg"] in QUICKAPP_KEEP:
+                    if not q["closed"]:
+                        print(f"  保留 {q['name']}（{q['pkg']}）：{QUICKAPP_KEEP[q['pkg']]}")
+                    continue
                 if q["method"] == "setting":
                     try:
                         print(set_quickapp_service(s))
@@ -487,6 +501,9 @@ def main():
             record(s, done)
             bad = []
             for q in quickapps(s):
+                if q["pkg"] in QUICKAPP_KEEP:
+                    print(f"  {q['name']:<10} {q['pkg']:<34} 保留（不挂起，保快递等系统服务）")
+                    continue
                 ok = q["closed"]
                 reason = "" if ok else "（" + ((why.get(q["pkg"]) or "").splitlines() or ["系统没给原因"])[-1][:160] + "）"
                 print(f"  {q['name']:<10} {q['pkg']:<34} {'已关闭' if ok else '关闭失败' + reason}")
